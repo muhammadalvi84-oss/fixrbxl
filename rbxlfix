@@ -1,0 +1,514 @@
+--[[
+    MhmmdalviStudio v4.0  |  BY MHMMDALVI   (dasar: Copy Map UI v3.4)
+    Tab: Copy Map, Import Map, Replacer, Scripts, Info, Settings.
+    Import RBXL / RBXM / RBXLX / RBXMX: isi script dibaca LANGSUNG dari file lalu dipasang ke script hasil import.
+    Hanya GUI (tampilan + interaksi). Logika copy/import dipasang lewat:
+        UI.OnCopy   = function(services, fileName) ... end
+        UI.OnImport = function(path, opts) ... end   -- sudah terpasang (RBXL biner)
+        UI.OnScan   = function() ... end   -- opsional
+    Update progress dari logika kamu:
+        UI.Begin()
+        UI.SetProgress(persen, "judul status", "keterangan")
+        UI.SetProgress(100, "Selesai", "File tersimpan")
+]]
+
+local Players          = game:GetService("Players")
+local TweenService     = game:GetService("TweenService")
+local UserInputService = game:GetService("UserInputService")
+
+---------------------------------------------------------------------
+-- OWNER  (akun yang dikenali sebagai pemilik script ini)
+---------------------------------------------------------------------
+-- Cocokkan lewat username (tanpa peka huruf besar/kecil). Awalan "5KxVii" juga dikenali,
+-- jadi 5KxVii_02 otomatis owner. Lebih aman: isi UserId akunmu di OWNER_USER_IDS
+-- (angka UserId tampil di tab Info), karena username bisa ditiru akun lain.
+local OWNER_NAMES    = {"5KxVii"}
+local OWNER_USER_IDS = {}
+
+local function isOwnerPlayer(p)
+    if table.find(OWNER_USER_IDS, p.UserId) then return true end
+    local n = string.lower(p.Name)
+    for _, o in ipairs(OWNER_NAMES) do
+        if string.sub(n, 1, #o) == string.lower(o) then return true end
+    end
+    return false
+end
+local IS_OWNER = isOwnerPlayer(Players.LocalPlayer)
+
+---------------------------------------------------------------------
+-- THEME
+---------------------------------------------------------------------
+local T = {
+    Window   = Color3.fromRGB(14, 14, 20),
+    Panel    = Color3.fromRGB(19, 19, 27),
+    Card     = Color3.fromRGB(28, 28, 38),
+    Field    = Color3.fromRGB(10, 10, 14),
+    Line     = Color3.fromRGB(48, 48, 64),
+    Accent   = Color3.fromRGB(136, 96, 250),    -- ungu (tombol utama)
+    AccentLn = Color3.fromRGB(178, 148, 255),
+    OnAccent = Color3.fromRGB(255, 255, 255),
+    Text     = Color3.fromRGB(240, 240, 248),
+    Muted    = Color3.fromRGB(150, 150, 172),
+    Title    = Color3.fromRGB(172, 150, 255),
+    Ok       = Color3.fromRGB(52, 200, 120),
+    Bad      = Color3.fromRGB(240, 84, 96),
+    NavOn    = Color3.fromRGB(70, 50, 126),       -- menu aktif (abu gelap)
+}
+
+-- latar gelap dengan semburat ungu tipis
+local GLASS_BG = ColorSequence.new({
+    ColorSequenceKeypoint.new(0, Color3.fromRGB(16, 16, 24)),
+    ColorSequenceKeypoint.new(0.6, Color3.fromRGB(24, 19, 40)),
+    ColorSequenceKeypoint.new(1, Color3.fromRGB(14, 14, 22)),
+})
+
+local SERVICES = {
+    "Workspace", "Players", "Lighting", "MaterialService",
+    "ReplicatedFirst", "ReplicatedStorage", "ServerScriptService", "ServerStorage",
+    "StarterGui", "StarterPack", "StarterPlayer", "Teams",
+    "SoundService", "Chat", "TextChatService", "LocalizationService",
+}
+
+---------------------------------------------------------------------
+-- HELPER
+---------------------------------------------------------------------
+local function new(class, props, parent)
+    local o = Instance.new(class)
+    for k, v in pairs(props or {}) do o[k] = v end
+    if o:IsA("TextLabel") or o:IsA("TextButton") or o:IsA("TextBox") then
+        if o.TextSize <= 9 then o.TextSize = o.TextSize + 1 end
+    end
+    o.Parent = parent
+    return o
+end
+
+local function corner(p, r)
+    return new("UICorner", {CornerRadius = UDim.new(0, r)}, p)
+end
+
+local function stroke(p, color, thick, trans)
+    local st = new("UIStroke", {
+        Color = color, Thickness = thick or 1, Transparency = trans or 0,
+        ApplyStrokeMode = Enum.ApplyStrokeMode.Border,
+    }, p)
+    if color == T.Line then
+        -- terang di tengah, memudar ke ujung: efek "glow" seperti desain referensi
+        new("UIGradient", {
+            Transparency = NumberSequence.new({
+                NumberSequenceKeypoint.new(0, 0.75),
+                NumberSequenceKeypoint.new(0.5, 0),
+                NumberSequenceKeypoint.new(1, 0.75),
+            }),
+        }, st)
+    end
+    return st
+end
+
+local function label(parent, props)
+    local d = {
+        BackgroundTransparency = 1, BorderSizePixel = 0,
+        Font = Enum.Font.Gotham, TextSize = 12, TextColor3 = T.Text,
+        TextXAlignment = Enum.TextXAlignment.Left, Text = "",
+    }
+    for k, v in pairs(props) do d[k] = v end
+    return new("TextLabel", d, parent)
+end
+
+local function button(parent, props)
+    local d = {
+        AutoButtonColor = false, BorderSizePixel = 0,
+        Font = Enum.Font.GothamBold, TextSize = 10, TextColor3 = T.Text,
+        BackgroundColor3 = T.Card, Text = "",
+    }
+    for k, v in pairs(props) do d[k] = v end
+    local b = new("TextButton", d, parent)
+    local base = b.BackgroundColor3
+    b.MouseEnter:Connect(function()
+        if b:GetAttribute("NoHover") then return end
+        TweenService:Create(b, TweenInfo.new(0.12), {BackgroundColor3 = base:Lerp(Color3.new(1, 1, 1), 0.35)}):Play()
+    end)
+    b.MouseLeave:Connect(function()
+        if b:GetAttribute("NoHover") then return end
+        TweenService:Create(b, TweenInfo.new(0.12), {BackgroundColor3 = base}):Play()
+    end)
+    return b
+end
+
+local function fmt(n)
+    local s = tostring(math.floor(n))
+    local out = s:reverse():gsub("(%d%d%d)", "%1."):reverse()
+    return (out:gsub("^%.", ""))
+end
+
+local function mmss(sec)
+    sec = math.max(0, math.floor(sec))
+    return string.format("%02d:%02d", sec // 60, sec % 60)
+end
+
+---------------------------------------------------------------------
+-- PARENT GUI
+---------------------------------------------------------------------
+local ok, host = pcall(function()
+    return (gethui and gethui()) or game:GetService("CoreGui")
+end)
+if not ok or not host then
+    host = Players.LocalPlayer:WaitForChild("PlayerGui")
+end
+for _, nm in ipairs({"CopyMapUI", "MhmmdalviStudio"}) do
+    local old = host:FindFirstChild(nm)
+    if old then old:Destroy() end
+end
+
+local UI = {}
+UI.Cleanups = {}
+UI.Settings = {stream = true, decompile = true, threads = 16, timeout = 8, radius = 2048}
+UI.CancelFlag = false
+UI.ScriptCache = setmetatable({}, {__mode = "k"})
+local gui = new("ScreenGui", {
+    Name = "MhmmdalviStudio", ResetOnSpawn = false, IgnoreGuiInset = true,
+    ZIndexBehavior = Enum.ZIndexBehavior.Sibling,
+}, host)
+
+local WIN_W, WIN_H = 910, 440
+-- Frame biasa (bukan CanvasGroup): CanvasGroup merender isinya sebagai tekstur lalu
+-- diskalakan, itu yang membuat teks blur. Dengan Frame, teks digambar langsung = tajam.
+local main = new("Frame", {
+    Name = "Main", AnchorPoint = Vector2.new(0.5, 0.5),
+    Position = UDim2.fromScale(0.5, 0.5), Size = UDim2.fromOffset(WIN_W, WIN_H),
+    BackgroundColor3 = Color3.new(1, 1, 1), BorderSizePixel = 0, ClipsDescendants = true,
+}, gui)
+corner(main, 26)
+do
+    local ms = stroke(main, T.Accent, 1.8, 0.15)
+    local mg = new("UIGradient", {
+        Color = ColorSequence.new({
+            ColorSequenceKeypoint.new(0, Color3.fromRGB(138, 92, 255)),
+            ColorSequenceKeypoint.new(0.5, Color3.fromRGB(255, 96, 200)),
+            ColorSequenceKeypoint.new(1, Color3.fromRGB(80, 200, 255)),
+        }),
+    }, ms)
+    TweenService:Create(mg, TweenInfo.new(7, Enum.EasingStyle.Linear, Enum.EasingDirection.In, -1), {Rotation = 360}):Play()
+end
+new("UIGradient", {Color = GLASS_BG, Rotation = 35}, main)
+
+local scale = new("UIScale", {}, main)
+local isOpen, animating, fitK = true, false, 1
+local function fitScale()
+    local cam = workspace.CurrentCamera
+    if not cam then return end
+    local vp = cam.ViewportSize
+    -- maks 0.88 (lebih kecil dari sebelumnya), dibulatkan ke kelipatan 0.05 agar piksel teks rapi
+    fitK = math.min(0.88, (vp.X * 0.9) / WIN_W, (vp.Y * 0.9) / WIN_H)
+    fitK = math.max(math.floor(fitK * 20) / 20, 0.5)
+    if isOpen and not animating then scale.Scale = fitK end
+end
+fitScale()
+if workspace.CurrentCamera then
+    workspace.CurrentCamera:GetPropertyChangedSignal("ViewportSize"):Connect(fitScale)
+end
+
+---------------------------------------------------------------------
+-- DRAG
+---------------------------------------------------------------------
+local function makeDraggable(handle)
+    local dragging, startInput, startPos
+    handle.InputBegan:Connect(function(i)
+        if i.UserInputType == Enum.UserInputType.MouseButton1 or i.UserInputType == Enum.UserInputType.Touch then
+            dragging, startInput, startPos = true, i.Position, main.Position
+            i.Changed:Connect(function()
+                if i.UserInputState == Enum.UserInputState.End then dragging = false end
+            end)
+        end
+    end)
+    UserInputService.InputChanged:Connect(function(i)
+        if dragging and (i.UserInputType == Enum.UserInputType.MouseMovement or i.UserInputType == Enum.UserInputType.Touch) then
+            local d = (i.Position - startInput) / scale.Scale
+            main.Position = UDim2.new(startPos.X.Scale, startPos.X.Offset + d.X, startPos.Y.Scale, startPos.Y.Offset + d.Y)
+        end
+    end)
+end
+
+---------------------------------------------------------------------
+-- HEADER
+---------------------------------------------------------------------
+local header = new("Frame", {
+    Name = "Header", Position = UDim2.fromOffset(10, 8), Size = UDim2.new(1, -20, 0, 46),
+    BackgroundColor3 = T.Panel, BorderSizePixel = 0,
+}, main)
+corner(header, 16)
+stroke(header, T.Line, 1)
+makeDraggable(header)
+new("UIGradient", {
+    Color = ColorSequence.new({
+        ColorSequenceKeypoint.new(0, Color3.fromRGB(52, 34, 104)),
+        ColorSequenceKeypoint.new(0.55, Color3.fromRGB(26, 21, 44)),
+        ColorSequenceKeypoint.new(1, Color3.fromRGB(19, 19, 27)),
+    }),
+}, header)
+
+local headLogo = new("Frame", {
+    Position = UDim2.fromOffset(8, 6), Size = UDim2.fromOffset(34, 34),
+    BackgroundColor3 = T.Card, BorderSizePixel = 0,
+}, header)
+corner(headLogo, 11)
+stroke(headLogo, T.Line, 1)
+label(headLogo, {
+    Text = "M", Font = Enum.Font.GothamBlack, TextSize = 18, TextColor3 = T.Title,
+    TextXAlignment = Enum.TextXAlignment.Center, Size = UDim2.fromScale(1, 1),
+})
+label(header, {
+    Text = "BUILD  ·  COPY  ·  IMPORT", Font = Enum.Font.GothamMedium, TextSize = 9, TextColor3 = T.Muted,
+    Position = UDim2.fromOffset(52, 3), Size = UDim2.fromOffset(200, 11),
+})
+label(header, {
+    Text = 'Mhmmdalvi<font color="#C79BFF">Studio</font>', RichText = true,
+    Font = Enum.Font.GothamBold, TextSize = 15, TextColor3 = T.Text,
+    Position = UDim2.fromOffset(52, 13), Size = UDim2.fromOffset(260, 18),
+})
+local statDot = new("Frame", {
+    Position = UDim2.fromOffset(53, 35), Size = UDim2.fromOffset(6, 6),
+    BackgroundColor3 = T.Ok, BorderSizePixel = 0,
+}, header)
+corner(statDot, 3)
+label(header, {
+    Text = Players.LocalPlayer.Name .. "  ·  v4.0", TextSize = 9, TextColor3 = T.Muted,
+    Position = UDim2.fromOffset(65, 31), Size = UDim2.fromOffset(200, 14),
+})
+if IS_OWNER then
+    local badge = new("Frame", {
+        Position = UDim2.fromOffset(250, 14), Size = UDim2.fromOffset(62, 16),
+        BackgroundColor3 = Color3.fromRGB(255, 196, 60), BorderSizePixel = 0,
+    }, header)
+    corner(badge, 8)
+    label(badge, {
+        Text = "👑 OWNER", Font = Enum.Font.GothamBlack, TextSize = 9,
+        TextColor3 = Color3.fromRGB(40, 26, 0), TextXAlignment = Enum.TextXAlignment.Center,
+        Size = UDim2.fromScale(1, 1),
+    })
+end
+
+local function headIcon(text, x)
+    local b = new("TextButton", {
+        Text = text, Size = UDim2.fromOffset(34, 34), Position = UDim2.new(1, x, 0.5, -17),
+        BackgroundTransparency = 1, BorderSizePixel = 0, AutoButtonColor = false,
+        TextColor3 = T.Text, Font = Enum.Font.GothamBold, TextSize = 16,
+    }, header)
+    corner(b, 17)
+    stroke(b, T.Line, 1.5)
+    b.MouseEnter:Connect(function()
+        TweenService:Create(b, TweenInfo.new(0.12), {TextColor3 = T.AccentLn}):Play()
+    end)
+    b.MouseLeave:Connect(function()
+        TweenService:Create(b, TweenInfo.new(0.12), {TextColor3 = T.Text}):Play()
+    end)
+    return b
+end
+local btnClose    = headIcon("X", -42)
+local btnMinimize = headIcon("-", -80)   -- kecilkan (animasi)
+
+-- sidebar menu
+local sidebar = new("Frame", {
+    Position = UDim2.fromOffset(10, 62), Size = UDim2.new(0, 130, 1, -72),
+    BackgroundColor3 = T.Panel, BorderSizePixel = 0,
+}, main)
+corner(sidebar, 18)
+stroke(sidebar, T.Line, 1)
+new("UIListLayout", {
+    Padding = UDim.new(0, 3), SortOrder = Enum.SortOrder.LayoutOrder,
+    HorizontalAlignment = Enum.HorizontalAlignment.Center,
+}, sidebar)
+new("UIPadding", {PaddingTop = UDim.new(0, 10)}, sidebar)
+
+local function navItem(text, order)
+    local b = new("TextButton", {
+        LayoutOrder = order, Size = UDim2.new(1, -16, 0, 31), BackgroundColor3 = T.NavOn,
+        BackgroundTransparency = 1, Text = text, TextColor3 = T.Muted, Font = Enum.Font.GothamMedium,
+        TextSize = 12, TextXAlignment = Enum.TextXAlignment.Left, AutoButtonColor = false, BorderSizePixel = 0,
+    }, sidebar)
+    corner(b, 12)
+    new("UIPadding", {PaddingLeft = UDim.new(0, 14)}, b)
+    return b
+end
+local tabCopy     = navItem("🗺  Copy Map", 1)
+local tabImport   = navItem("📂  Import Map", 2)
+local tabReplacer = navItem("🔁  Replacer", 3)
+local tabScripts  = navItem("📜  Scripts", 4)
+local tabInfo     = navItem("ℹ  Info", 5)
+local tabSettings = navItem("⚙  Settings", 6)
+
+-- AKSI CEPAT (bawah sidebar)
+local quick = new("Frame", {
+    Position = UDim2.fromOffset(16, 358), Size = UDim2.fromOffset(118, 66), BackgroundTransparency = 1,
+}, main)
+label(quick, {
+    Text = "Aksi Cepat", TextSize = 9, TextColor3 = T.Muted,
+    Position = UDim2.fromOffset(4, 0), Size = UDim2.new(1, 0, 0, 12),
+})
+local btnPing = button(quick, {
+    Text = "Cek Koneksi", Position = UDim2.fromOffset(0, 14), Size = UDim2.new(1, 0, 0, 24),
+    BackgroundColor3 = Color3.fromRGB(37, 88, 200), TextColor3 = T.OnAccent, TextSize = 10,
+})
+corner(btnPing, 10)
+local btnHide = button(quick, {
+    Text = "Sembunyi", Position = UDim2.fromOffset(0, 42), Size = UDim2.new(1, 0, 0, 24),
+    BackgroundColor3 = T.Card, TextSize = 10,
+})
+corner(btnHide, 10)
+local pinging = false
+btnPing.MouseButton1Click:Connect(function()
+    if pinging then return end
+    pinging = true
+    btnPing.Text = "Mengecek..."
+    task.spawn(function()
+        local t0 = os.clock()
+        local ok = pcall(function() return game:HttpGet("https://www.roblox.com/robots.txt") end)
+        local ms = math.floor((os.clock() - t0) * 1000)
+        btnPing.Text = ok and ("OK  " .. ms .. " ms") or "Gagal"
+        task.wait(2)
+        btnPing.Text = "Cek Koneksi"
+        pinging = false
+    end)
+end)
+btnHide.MouseButton1Click:Connect(function()
+    if UI.Minimize then UI.Minimize() end
+end)
+
+---------------------------------------------------------------------
+-- BUKA / TUTUP GUI (BERANIMASI) + TOMBOL MELAYANG
+--   *  = kecilkan (animasi) -> tombol melayang CM muncul, tap untuk buka
+--   X  = tutup & keluar (animasi)
+--   RightCtrl = buka/tutup cepat (PC)
+---------------------------------------------------------------------
+local OPEN_FROM = 0.84
+local animToken = 0
+local uiConns = {}
+
+local fab = new("TextButton", {
+    Name = "Fab", AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.new(0, 44, 0.5, 0),
+    Size = UDim2.fromOffset(0, 0), BackgroundColor3 = T.Accent, Text = "M", TextColor3 = T.OnAccent,
+    Font = Enum.Font.GothamBlack, TextSize = 15, AutoButtonColor = false, BorderSizePixel = 0,
+    Visible = false, ZIndex = 50,
+}, gui)
+corner(fab, 30)
+stroke(fab, T.AccentLn, 2)
+local fabDot = new("Frame", {
+    Size = UDim2.fromOffset(12, 12), Position = UDim2.new(1, -14, 0, 2),
+    BackgroundColor3 = T.Ok, BorderSizePixel = 0, ZIndex = 51,
+}, fab)
+corner(fabDot, 6)
+
+local fabTip = label(fab, {
+    Position = UDim2.new(1, 10, 0.5, -15), AutomaticSize = Enum.AutomaticSize.X,
+    Size = UDim2.new(0, 0, 0, 30), BackgroundTransparency = 0, BackgroundColor3 = T.Window,
+    Text = "", TextSize = 10, Font = Enum.Font.GothamBold, ZIndex = 51, Visible = false,
+    TextTruncate = Enum.TextTruncate.AtEnd,
+})
+corner(fabTip, 15)
+stroke(fabTip, T.AccentLn, 1)
+new("UIPadding", {PaddingLeft = UDim.new(0, 12), PaddingRight = UDim.new(0, 12)}, fabTip)
+new("UISizeConstraint", {MaxSize = Vector2.new(420, 30)}, fabTip)
+
+local fabNoteId = 0
+function UI.FabNote(text, secs)
+    if not fab.Visible then return end
+    fabNoteId += 1
+    local id = fabNoteId
+    fabTip.Text = text
+    fabTip.Visible = true
+    task.delay(secs or 3, function()
+        if id == fabNoteId then fabTip.Visible = false end
+    end)
+end
+
+local fabMoved = false
+do
+    local dragging, startIn, startPos = false, nil, nil
+    fab.InputBegan:Connect(function(i)
+        if i.UserInputType == Enum.UserInputType.MouseButton1 or i.UserInputType == Enum.UserInputType.Touch then
+            dragging, fabMoved = true, false
+            startIn, startPos = i.Position, fab.Position
+            i.Changed:Connect(function()
+                if i.UserInputState == Enum.UserInputState.End then dragging = false end
+            end)
+        end
+    end)
+    table.insert(uiConns, UserInputService.InputChanged:Connect(function(i)
+        if dragging and (i.UserInputType == Enum.UserInputType.MouseMovement or i.UserInputType == Enum.UserInputType.Touch) then
+            local d = i.Position - startIn
+            if d.Magnitude > 8 then fabMoved = true end
+            if fabMoved then
+                fab.Position = UDim2.new(startPos.X.Scale, startPos.X.Offset + d.X, startPos.Y.Scale, startPos.Y.Offset + d.Y)
+            end
+        end
+    end))
+end
+
+local function showFab()
+    fab.Visible = true
+    fab.Size = UDim2.fromOffset(0, 0)
+    TweenService:Create(fab, TweenInfo.new(0.35, Enum.EasingStyle.Back, Enum.EasingDirection.Out),
+        {Size = UDim2.fromOffset(56, 56)}):Play()
+end
+local function hideFab()
+    if not fab.Visible then return end
+    fabTip.Visible = false
+    local t = TweenService:Create(fab, TweenInfo.new(0.18, Enum.EasingStyle.Quad, Enum.EasingDirection.In),
+        {Size = UDim2.fromOffset(0, 0)})
+    t:Play()
+    task.delay(0.2, function()
+        if isOpen then fab.Visible = false end
+    end)
+end
+
+local function openWindow()
+    animToken += 1
+    local my = animToken
+    isOpen = true
+    animating = true
+    hideFab()
+    main.Visible = true
+    scale.Scale = fitK * OPEN_FROM
+    TweenService:Create(scale, TweenInfo.new(0.38, Enum.EasingStyle.Back, Enum.EasingDirection.Out), {Scale = fitK}):Play()
+    task.delay(0.42, function()
+        if animToken == my then
+            animating = false
+            scale.Scale = fitK
+        end
+    end)
+end
+
+local function closeWindow(destroyAfter)
+    animToken += 1
+    local my = animToken
+    isOpen = false
+    animating = true
+    TweenService:Create(scale, TweenInfo.new(0.24, Enum.EasingStyle.Quad, Enum.EasingDirection.In), {Scale = fitK * OPEN_FROM}):Play()
+    task.delay(0.26, function()
+        if animToken ~= my then return end
+        main.Visible = false
+        if destroyAfter then gui:Destroy() else showFab() end
+    end)
+end
+
+function UI.Minimize() if isOpen then closeWindow(false) end end
+function UI.Restore()
+    if UI.OnRestore then pcall(UI.OnRestore) end
+    if not isOpen then openWindow() end
+end
+function UI.IsOpen() return isOpen end
+function UI.OverGui(p)
+    if fab.Visible then
+        local a, s = fab.AbsolutePosition, fab.AbsoluteSize
+        if p.X >= a.X and p.X <= a.X + s.X and p.Y >= a.Y and p.Y <= a.Y + s.Y then return true end
+    end
+    if isOpen and main.Visible then
+        local a, s = main.AbsolutePosition, main.AbsoluteSize
+        if p.X >= a.X and p.X <= a.X + s.X and p.Y >= a.Y and p.Y <= a.Y + s.Y then return true end
+    end
+    return false
+end
+
+fab.MouseButton1Click:Connect(function()
+    if fabMoved then return end
+    UI.Restore()
+end
